@@ -3,16 +3,19 @@ import joblib
 import pickle
 import pandas as pd
 import numpy as np
-import requests
-import os
+import xgboost as xgb
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.metrics import mean_squared_error
 from scipy.sparse import csr_matrix
 
-
 # --------------------------------------------------
 # Load models & data (cached)
 # --------------------------------------------------
+@st.cache_resource
+def load_xgb():
+    model = xgb.XGBRegressor()
+    model.load_model("models/xgb_model.json")
+    return model
 
 @st.cache_resource
 def load_assets():
@@ -124,29 +127,37 @@ def hybrid_recommendation(course_id, n=5):
 
     return hybrid_scores.sort_values(ascending=False).head(n)
 
-def get_xgb_recommendations(user_id, n=5):
+def get_xgb_recommendations(user_id, n=5, candidate_k=100):
 
     if user_id not in user_encoder.classes_:
         return pd.Series(dtype=float)
 
+    # ---- seen courses ----
     seen_courses = interactions_df[
         interactions_df.user_id == user_id
     ]['course_id'].unique()
 
-    candidate_courses = course_stats[
-        ~course_stats.course_id.isin(seen_courses)
-    ]['course_id'].values
+    # ---- LIMIT candidates (critical for speed) ----
+    candidate_courses = (
+        course_stats[
+            ~course_stats.course_id.isin(seen_courses)
+        ]
+        .sort_values("rating_count", ascending=False)
+        .head(candidate_k)["course_id"]
+        .values
+    )
 
+    # ---- user features ----
     user_enc = user_encoder.transform([user_id])[0]
     user_row = user_stats[user_stats.user_id == user_id].iloc[0]
 
-    scores = []
+    feature_rows = []
+    valid_course_ids = []
 
     for cid in candidate_courses:
         if cid not in course_encoder.classes_:
             continue
 
-        cid_enc = course_encoder.transform([cid])[0]
         course_row = course_stats[course_stats.course_id == cid].iloc[0]
 
         meta_row = courses_df.loc[
@@ -157,31 +168,42 @@ def get_xgb_recommendations(user_id, n=5):
         if meta_row.empty:
             continue
 
-        meta_row = meta_row.fillna("unknown").astype(str)
-        meta = ohe.transform(meta_row)
+        meta = ohe.transform(
+            meta_row.fillna("unknown").astype(str)
+        )
 
-        features = np.hstack([
-            [[
-                user_enc,
-                cid_enc,
-                course_row.avg_rating,
-                course_row.rating_count,
-                user_row.user_avg_rating,
-                user_row.user_rating_count
-            ]],
-            meta
-        ])
+        feature_rows.append(
+            np.hstack([
+                [
+                    user_enc,
+                    course_encoder.transform([cid])[0],
+                    course_row.avg_rating,
+                    course_row.rating_count,
+                    user_row.user_avg_rating,
+                    user_row.user_rating_count
+                ],
+                meta[0]
+            ])
+        )
 
-        score = xgb_model.predict(features)[0]
-        scores.append((cid, score))
+        valid_course_ids.append(cid)
+
+    if not feature_rows:
+        return pd.Series(dtype=float)
+
+    # ---- BATCH prediction (FAST) ----
+    X = np.array(feature_rows, dtype="float32")
+    scores = xgb_model.predict(X)
 
     return (
-        pd.DataFrame(scores, columns=["course_id", "similarity_score"])
+        pd.DataFrame({
+            "course_id": valid_course_ids,
+            "similarity_score": scores
+        })
         .set_index("course_id")
         .sort_values("similarity_score", ascending=False)
         .head(n)["similarity_score"]
     )
-
 
 @st.cache_data
 def rmse_cf_fast(interactions_df, sample_size=1000):
@@ -435,6 +457,9 @@ with st.sidebar:
         ]
     )
 
+    if model_type == "XGBoost (Personalized)":
+        xgb_model = load_xgb()
+        
     course_id_input = st.text_input(
         "Course ID",
         placeholder="e.g. 101",
@@ -527,3 +552,4 @@ st.success(f"🏆 Best Model: **{best_model}**")
 #    results_df.to_csv(index=False),
 #    file_name="recommendations.csv"
 #)
+
