@@ -486,7 +486,12 @@ with st.sidebar:
 # --------------------------------------------------
 
 if run_btn:
+    with st.spinner(f"Generating recommendations using {model_type}..."):
 
+        st.markdown(f"### 🎯 Recommendations ({model_type})")
+        st.caption("Personalized suggestions based on your preferences and behavior for Online Courses")
+
+    
     if not course_id_input.isdigit():
         st.error("❌ Please enter a valid numeric Course ID")
         st.stop()
@@ -497,7 +502,7 @@ if run_btn:
         st.warning("⚠️ Course ID not found in dataset")
         st.stop()
 
-    with st.spinner("Generating recommendations..."):
+    with st.spinner(f"Generating recommendations using {model_type}..."):
 
         if model_type == "Collaborative Filtering":
             results = get_cf_scores(course_id).drop(course_id).head(top_n)
@@ -519,7 +524,7 @@ if run_btn:
                 st.info("ℹ️ No recommendations available for this user")
                 st.stop()
 
-    st.subheader("🎯 Recommended Courses")
+   # st.subheader("🎯 Recommended Courses")
 
     results_df = (
         results.reset_index()
@@ -552,4 +557,5 @@ st.success(f"🏆 Best Model: **{best_model}**")
 #    results_df.to_csv(index=False),
 #    file_name="recommendations.csv"
 #)
+
 
