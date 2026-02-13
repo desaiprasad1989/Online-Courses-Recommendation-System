@@ -63,7 +63,7 @@ def load_assets():
     with open("models/user_stats.pkl", "rb") as f:
         user_stats = pickle.load(f)
 
-     with open("models/lgbm_model.pkl", "rb") as f:
+    with open("models/lgbm_model.pkl", "rb") as f:
         lgbm_model = pickle.load(f)
          
     courses_df = courses_df.drop_duplicates(subset="course_id")
@@ -743,6 +743,7 @@ st.success(f"🏆 Best Model: **{best_model}**")
 #    results_df.to_csv(index=False),
 #    file_name="recommendations.csv"
 #)
+
 
 
 
