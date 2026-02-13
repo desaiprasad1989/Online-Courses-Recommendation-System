@@ -35,6 +35,8 @@ def load_assets():
     with open("models/item_ids.pkl", "rb") as f:
         item_ids = pickle.load(f)
 
+    item_id_to_idx = {id_: i for i, id_ in enumerate(item_ids)}
+    
     with open("models/hybrid_config.pkl", "rb") as f:
         hybrid_config = pickle.load(f)
 
@@ -111,7 +113,17 @@ def get_cf_scores(course_id, top_k=20):
     )
 
 def get_cbf_scores(course_id, top_k=30):
-    idx = item_ids.index(course_id)
+
+    # Create lookup dictionary if not already created
+    global item_id_to_idx
+    if 'item_id_to_idx' not in globals():
+        item_id_to_idx = {id_: i for i, id_ in enumerate(item_ids)}
+
+    # Check existence
+    if course_id not in item_id_to_idx:
+        return None
+
+    idx = item_id_to_idx[course_id]
 
     sims = cosine_similarity(
         tfidf_matrix[idx],
@@ -120,10 +132,12 @@ def get_cbf_scores(course_id, top_k=30):
 
     top_idx = np.argsort(sims)[::-1][:top_k]
 
-    return pd.Series(
+    scores = pd.Series(
         sims[top_idx],
         index=[item_ids[i] for i in top_idx]
     )
+
+    return scores.drop(course_id, errors="ignore")
 
 
 def hybrid_recommendation(course_id, n=5):
@@ -679,7 +693,13 @@ if run_btn:
     with st.spinner(f"Generating recommendations using {model_type}..."):
 
         if model_type == "Collaborative Filtering":
-            results = get_cf_scores(course_id).drop(course_id).head(top_n)
+            scores = get_cbf_scores(course_id)
+
+            if scores is None:
+                st.error("❌ Course ID not found in CBF model")
+                st.stop()
+
+            results = scores.head(top_n)
 
         elif model_type == "Content-Based Filtering":
             results = get_cbf_scores(course_id).drop(course_id).head(top_n)
@@ -743,6 +763,7 @@ st.success(f"🏆 Best Model: **{best_model}**")
 #    results_df.to_csv(index=False),
 #    file_name="recommendations.csv"
 #)
+
 
 
 
