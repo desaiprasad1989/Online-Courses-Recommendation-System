@@ -693,6 +693,9 @@ if run_btn:
     with st.spinner(f"Generating recommendations using {model_type}..."):
 
         if model_type == "Collaborative Filtering":
+            results = get_cf_scores(course_id).drop(course_id).head(top_n)
+            
+        elif model_type == "Content-Based Filtering":
             scores = get_cbf_scores(course_id)
 
             if scores is None:
@@ -700,10 +703,6 @@ if run_btn:
                 st.stop()
 
             results = scores.head(top_n)
-
-        elif model_type == "Content-Based Filtering":
-            results = get_cbf_scores(course_id).drop(course_id).head(top_n)
-
         elif model_type == "Hybrid":
             results = hybrid_recommendation(course_id, top_n)
 
@@ -763,6 +762,7 @@ st.success(f"🏆 Best Model: **{best_model}**")
 #    results_df.to_csv(index=False),
 #    file_name="recommendations.csv"
 #)
+
 
 
 
