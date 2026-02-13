@@ -4,6 +4,7 @@ import pickle
 import pandas as pd
 import numpy as np
 import xgboost as xgb
+import lightgbm as lgb
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.metrics import mean_squared_error
 from scipy.sparse import csr_matrix
@@ -16,6 +17,12 @@ def load_xgb():
     model = xgb.XGBRegressor()
     model.load_model("models/xgb_model.json")
     return model
+
+@st.cache_resource
+def load_lgbm():
+    with open("models/lightgbm_course_recommender.pkl", "rb") as f:
+        lgbm_model = pickle.load(f)
+    return lgbm_model
 
 @st.cache_resource
 def load_assets():
@@ -56,6 +63,9 @@ def load_assets():
     with open("models/user_stats.pkl", "rb") as f:
         user_stats = pickle.load(f)
 
+     with open("models/lgbm_model.pkl", "rb") as f:
+        lgbm_model = pickle.load(f)
+         
     courses_df = courses_df.drop_duplicates(subset="course_id")
 
     courses_df[['difficulty_level', 'instructor']] = (
@@ -66,12 +76,12 @@ def load_assets():
 
     return (
         user_item_sparse, tfidf_matrix, item_ids, hybrid_config, courses_df,
-        xgb_model, user_encoder, course_encoder, ohe, course_stats, user_stats,interactions_df, feature_schema
+        xgb_model, user_encoder, course_encoder, ohe, course_stats, user_stats,interactions_df, feature_schema, lgbm_model
     )
 
 (
     user_item_sparse, tfidf_matrix, item_ids, hybrid_config, courses_df,
-    xgb_model, user_encoder, course_encoder, ohe, course_stats, user_stats,interactions_df, feature_schema
+    xgb_model, user_encoder, course_encoder, ohe, course_stats, user_stats,interactions_df, feature_schema, lgbm_model
 ) = load_assets()
 
 
@@ -194,6 +204,96 @@ def get_xgb_recommendations(user_id, n=5, candidate_k=100):
     # ---- BATCH prediction (FAST) ----
     X = np.array(feature_rows, dtype="float32")
     scores = xgb_model.predict(X)
+
+    return (
+        pd.DataFrame({
+            "course_id": valid_course_ids,
+            "similarity_score": scores
+        })
+        .set_index("course_id")
+        .sort_values("similarity_score", ascending=False)
+        .head(n)["similarity_score"]
+    )
+
+def get_lgbm_recommendations(user_id, n=5, candidate_k=100):
+
+    if user_id not in user_encoder.classes_:
+        return pd.Series(dtype=float)
+
+    seen_courses = interactions_df[
+        interactions_df.user_id == user_id
+    ]["course_id"].unique()
+
+    candidate_courses = (
+        course_stats[
+            ~course_stats.course_id.isin(seen_courses)
+        ]
+        .sort_values("rating_count", ascending=False)
+        .head(candidate_k)["course_id"]
+        .values
+    )
+
+    user_enc = user_encoder.transform([user_id])[0]
+    user_row = user_stats[user_stats.user_id == user_id].iloc[0]
+
+    feature_rows = []
+    valid_course_ids = []
+
+    for cid in candidate_courses:
+
+        if cid not in course_encoder.classes_:
+            continue
+
+        try:
+            course_row = course_stats[
+                course_stats.course_id == cid
+            ].iloc[0]
+        except IndexError:
+            continue
+
+        meta_row = courses_df.loc[
+            courses_df.course_id == cid,
+            ["difficulty_level", "instructor"]
+        ].head(1)
+
+        if meta_row.empty:
+            continue
+
+        meta_ohe_raw = ohe.transform(meta_row)
+
+        if hasattr(meta_ohe_raw, "toarray"):
+            meta_ohe = meta_ohe_raw.toarray()[0]
+        else:
+            meta_ohe = meta_ohe_raw[0]
+
+        numeric_features = [
+            user_enc,
+            course_encoder.transform([cid])[0],
+            course_row.avg_rating,
+            course_row.rating_count,
+            user_row.user_avg_rating,
+            user_row.user_rating_count
+        ]
+
+        full_features = np.hstack([numeric_features, meta_ohe])
+
+        feature_rows.append(full_features)
+        valid_course_ids.append(cid)
+
+    if not feature_rows:
+        return pd.Series(dtype=float)
+
+    X = np.array(feature_rows, dtype="float32")
+
+    #  SAFETY CHECK
+    if X.shape[1] != lgbm_model.n_features_in_:
+        st.error(
+            f"Feature mismatch! Model expects {lgbm_model.n_features_in_}, "
+            f"but got {X.shape[1]}"
+        )
+        st.stop()
+
+    scores = lgbm_model.predict(X)
 
     return (
         pd.DataFrame({
@@ -376,6 +476,78 @@ def rmse_xgb_fast(interactions_df, sample_size=3000):
     rmse = np.sqrt(mse)
     return rmse
 
+@st.cache_data
+def rmse_lgbm_fast(interactions_df, sample_size=3000):
+
+    df = interactions_df.sample(
+        min(sample_size, len(interactions_df)),
+        random_state=42
+    )
+
+    y_true = []
+    y_pred = []
+
+    for _, row in df.iterrows():
+
+        user_id = row["user_id"]
+        course_id = row["course_id"]
+        rating = row["rating"]
+
+        if (
+            user_id not in user_encoder.classes_ or
+            course_id not in course_encoder.classes_
+        ):
+            continue
+
+        try:
+            course_row = course_stats.loc[
+                course_stats.course_id == course_id
+            ].iloc[0]
+
+            user_row = user_stats.loc[
+                user_stats.user_id == user_id
+            ].iloc[0]
+        except IndexError:
+            continue
+
+        meta_row = courses_df.loc[
+            courses_df.course_id == course_id,
+            ["difficulty_level", "instructor"]
+        ].head(1)
+
+        if meta_row.empty:
+            continue
+
+        meta_ohe_raw = ohe.transform(meta_row)
+
+        if hasattr(meta_ohe_raw, "toarray"):
+            meta_ohe = meta_ohe_raw.toarray()[0]
+        else:
+            meta_ohe = meta_ohe_raw[0]
+
+        numeric_features = [
+            user_encoder.transform([user_id])[0],
+            course_encoder.transform([course_id])[0],
+            course_row.avg_rating,
+            course_row.rating_count,
+            user_row.user_avg_rating,
+            user_row.user_rating_count
+        ]
+
+        full_features = np.hstack([numeric_features, meta_ohe]).reshape(1, -1)
+
+        if full_features.shape[1] != lgbm_model.n_features_in_:
+            continue
+
+        pred = lgbm_model.predict(full_features)[0]
+
+        y_true.append(rating)
+        y_pred.append(pred)
+
+    if len(y_true) == 0:
+        return np.nan
+
+    return np.sqrt(mean_squared_error(y_true, y_pred))
 
 @st.cache_data
 def compute_all_rmse(interactions_df, alpha=0.5):
@@ -383,7 +555,8 @@ def compute_all_rmse(interactions_df, alpha=0.5):
         "Collaborative Filtering": rmse_cf_fast(interactions_df),
         "Content-Based Filtering": rmse_cbf_fast(interactions_df),
         "Hybrid": rmse_hybrid_fast(interactions_df, alpha),
-        "XGBoost": rmse_xgb_fast(interactions_df)
+        "XGBoost": rmse_xgb_fast(interactions_df),
+        "LightGBM": rmse_lgbm_fast(interactions_df)
     }
 
 rmse_scores = compute_all_rmse(interactions_df)
@@ -418,7 +591,7 @@ st.markdown(
 st.title("📚 Course Recommendation System")
 st.caption(
     "Hybrid Recommendation Engine using Collaborative Filtering, "
-    "Content-Based Filtering & XGBoost"
+    "Content-Based Filtering, LightGBM & XGBoost"
 )
 
 st.divider()
@@ -453,7 +626,8 @@ with st.sidebar:
             "Collaborative Filtering",
             "Content-Based Filtering",
             "Hybrid",
-            "XGBoost (Personalized)"
+            "XGBoost (Personalized)",
+            "LightGBM (Personalized)"
         ]
     )
 
@@ -513,6 +687,18 @@ if run_btn:
         elif model_type == "Hybrid":
             results = hybrid_recommendation(course_id, top_n)
 
+        elif model_type == "LightGBM (Personalized)":
+
+            if not user_id_input.isdigit():
+                st.error("❌ User ID required for LightGBM")
+                st.stop()
+
+            results = get_lgbm_recommendations(int(user_id_input), top_n)
+
+            if results.empty:
+                st.info("No recommendations available for this user")
+                st.stop()
+        
         else:
             if not user_id_input.isdigit():
                 st.error("❌ User ID required for XGBoost")
@@ -557,5 +743,6 @@ st.success(f"🏆 Best Model: **{best_model}**")
 #    results_df.to_csv(index=False),
 #    file_name="recommendations.csv"
 #)
+
 
 
