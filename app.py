@@ -8,6 +8,7 @@ import lightgbm as lgb
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.metrics import mean_squared_error
 from scipy.sparse import csr_matrix
+import matplotlib.pyplot as plt
 
 # --------------------------------------------------
 # Load models & data (cached)
@@ -754,14 +755,61 @@ rmse_df = (
 
 st.dataframe(rmse_df, use_container_width=True)
 
-best_model = rmse_df.index[0]
-st.success(f"🏆 Best Model: **{best_model}**")
+# Convert to DataFrame
+rmse_df = pd.DataFrame(
+    rmse_scores.items(),
+    columns=["Model", "RMSE"]
+).sort_values("RMSE")
+
+models = rmse_df["Model"].tolist()
+scores = rmse_df["RMSE"].tolist()
+
+best_model = rmse_df.iloc[0]["Model"]
+best_score = rmse_df.iloc[0]["RMSE"]
+
+worst_score = rmse_df.iloc[-1]["RMSE"]
+improvement = ((worst_score - best_score) / worst_score) * 100
+
+col1, col2, col3 = st.columns(3)
+
+col1.metric("🏆 Best Model", best_model)
+col2.metric("📉 Best RMSE", f"{best_score:.4f}")
+col3.metric("🚀 Improvement vs Worst", f"{improvement:.2f}%")
+
+
+fig, ax = plt.subplots()
+
+bars = ax.bar(models, scores)
+
+ax.set_xlabel("Models")
+ax.set_ylabel("RMSE (Lower is Better)")
+ax.set_title("RMSE Comparison of Recommendation Models")
+
+plt.xticks(rotation=45)
+plt.tight_layout()
+
+# Annotate best model
+ax.annotate(
+    "Best Model",
+    xy=(0, best_score),
+    xytext=(0, best_score + 0.1),
+    arrowprops=dict(),
+    ha="center"
+)
+
+st.pyplot(fig)
+
+best_model = min(rmse_scores, key=rmse_scores.get)
+
+st.success(f"🏆 Best Model Based on RMSE: {best_model} "
+           f"(RMSE: {rmse_scores[best_model]:.4f})")
 
 #st.download_button(
 #    "⬇️ Download Recommendations",
 #    results_df.to_csv(index=False),
 #    file_name="recommendations.csv"
 #)
+
 
 
 
