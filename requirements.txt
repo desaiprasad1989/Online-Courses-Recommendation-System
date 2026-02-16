@@ -6,3 +6,4 @@ joblib
 scipy
 xgboost
 lightgbm
+matplotlib
